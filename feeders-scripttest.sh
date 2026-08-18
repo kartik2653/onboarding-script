@@ -6,8 +6,8 @@ set -euo pipefail
 # Configuration
 # ============================================================
 
-OWNER="----X----"  # Replace with your GitHub username or organization
-REPO="----X----"   # Replace with your GitHub repository name
+OWNER="----X----"  # Replace with your GitHub username or organization (intellicars)
+REPO="----X----"   # Replace with your GitHub repository name (feeders)
 GITHUB_TOKEN="----X----"  # Replace with your GitHub Personal Access Token
 
 read -p "Enter environment name: " ENVIRONMENT
@@ -107,14 +107,11 @@ fi
 echo "✓ Branch created successfully: $BRANCH_NAME"
 
 
-
-
-
 # ============================================================
 # UPDATE docker-image.yml FROM TEMPLATE
 # ============================================================
 
-TEMPLATE_FILE="templates/fms-docker-image.yml"
+TEMPLATE_FILE="templates/feeders-docker-image.yml"
 FILE_PATH=".github/workflows/docker-image.yml"
 
 echo ""
@@ -122,32 +119,16 @@ echo "=========================================="
 echo "Updating docker-image.yml"
 echo "=========================================="
 
-# ------------------------------------------------------------
-# Check template exists
-# ------------------------------------------------------------
-
 if [[ ! -f "$TEMPLATE_FILE" ]]; then
     echo "ERROR: Template file not found: $TEMPLATE_FILE"
     exit 1
 fi
 
-# ------------------------------------------------------------
-# Create temporary file from template
-# ------------------------------------------------------------
-
 TEMP_FILE=$(mktemp)
 
 cp "$TEMPLATE_FILE" "$TEMP_FILE"
 
-# ------------------------------------------------------------
-# Replace placeholders
-# ------------------------------------------------------------
-
 sed -i "s/{{__ENVIRONMENT__}}/$ENVIRONMENT/g" "$TEMP_FILE"
-
-# ------------------------------------------------------------
-#  Check for unresolved placeholders
-# ------------------------------------------------------------
 
 if grep -q '{{__[^}]*__}}' "$TEMP_FILE"; then
     echo "ERROR: Unresolved onboarding placeholders found:"
@@ -155,10 +136,6 @@ if grep -q '{{__[^}]*__}}' "$TEMP_FILE"; then
     rm -f "$TEMP_FILE"
     exit 1
 fi
-
-# ------------------------------------------------------------
-# Get existing file SHA from the new branch
-# ------------------------------------------------------------
 
 FILE_RESPONSE=$(github_api \
     "$API/repos/$OWNER/$REPO/contents/$FILE_PATH?ref=$BRANCH_NAME")
@@ -176,15 +153,7 @@ echo "✓ Existing file found"
 echo "  Branch: $BRANCH_NAME"
 echo "  File:   $FILE_PATH"
 
-# ------------------------------------------------------------
-# Base64 encode generated file
-# ------------------------------------------------------------
-
 ENCODED_CONTENT=$(base64 -w 0 "$TEMP_FILE")
-
-# ------------------------------------------------------------
-# Update file on GitHub
-# ------------------------------------------------------------
 
 UPDATE_RESPONSE=$(github_api \
     -X PUT \
@@ -202,10 +171,6 @@ UPDATE_RESPONSE=$(github_api \
             branch: $branch
         }')")
 
-# ------------------------------------------------------------
-# Check result
-# ------------------------------------------------------------
-
 UPDATED_SHA=$(echo "$UPDATE_RESPONSE" | jq -r '.content.sha')
 
 if [[ -z "$UPDATED_SHA" || "$UPDATED_SHA" == "null" ]]; then
@@ -219,11 +184,36 @@ echo "✓ Successfully updated $FILE_PATH"
 echo "✓ Branch: $BRANCH_NAME"
 echo "✓ Commit SHA: $UPDATED_SHA"
 
-# ------------------------------------------------------------
-# Cleanup
-# ------------------------------------------------------------
-
 rm -f "$TEMP_FILE"
+
+
+# ============================================================
+# Helper: read compact JSON from a file path
+# ============================================================
+
+read_config_json() {
+    local label="$1"
+    local path=""
+
+    read -p "Enter path to ${label} config JSON: " path
+
+    if [[ -z "$path" ]]; then
+        echo "ERROR: ${label} config path is required." >&2
+        exit 1
+    fi
+
+    if [[ ! -f "$path" ]]; then
+        echo "ERROR: ${label} config file not found: $path" >&2
+        exit 1
+    fi
+
+    if ! jq -e . "$path" >/dev/null 2>&1; then
+        echo "ERROR: ${label} config is not valid JSON: $path" >&2
+        exit 1
+    fi
+
+    jq -c . "$path"
+}
 
 
 # ============================================================
@@ -323,44 +313,6 @@ set_environment_variable() {
     echo "✓ $name"
 }
 
-# ============================================================
-# UUID GENERATION
-# ============================================================
-
-generate_uuid() {
-    cat /proc/sys/kernel/random/uuid
-}
-
-
-# ============================================================
-# ED25519 KEY GENERATION
-# ============================================================
-
-generate_ed25519_keys() {
-
-    local private_key_file
-    local public_key_file
-
-    private_key_file=$(mktemp)
-    public_key_file=$(mktemp)
-
-    # Generate private key
-    openssl genpkey \
-        -algorithm ED25519 \
-        -out "$private_key_file"
-
-    # Generate public key
-    openssl pkey \
-        -in "$private_key_file" \
-        -pubout \
-        -out "$public_key_file"
-
-    SERVER_PRV_KEY=$(cat "$private_key_file")
-    SERVER_PUB_KEY=$(cat "$public_key_file")
-    
-
-    rm -f "$private_key_file" "$public_key_file"
-}
 
 # ============================================================
 # Environment Variables
@@ -372,13 +324,9 @@ echo "Setting environment variables"
 echo "=========================================="
 
 # Default values
-FLEETMODULE_CONTAINER_PORT="45001"
-FMSWS_CONTAINER_PORT="45014"
 GCP_ARTIFACT_REPO="flexifleets"
 GCP_PROJECT_ID="intellicar-in"
 GCP_REGION="asia-south1"
-GCP_VM_FMSWS_HOST_PORT="45014"
-GCP_VM_HOST_PORT="45001"
 GCP_VM_INSTANCE="dev1"
 GCP_VM_ZONE="asia-south1-c"
 
@@ -400,14 +348,6 @@ read -p "Enter GCP_VM_ZONE [$GCP_VM_ZONE]: " input
 GCP_VM_ZONE="${input:-$GCP_VM_ZONE}"
 
 set_environment_variable \
-    "FLEETMODULE_CONTAINER_PORT" \
-    "$FLEETMODULE_CONTAINER_PORT"
-
-set_environment_variable \
-    "FMSWS_CONTAINER_PORT" \
-    "$FMSWS_CONTAINER_PORT"
-
-set_environment_variable \
     "GCP_ARTIFACT_REPO" \
     "$GCP_ARTIFACT_REPO"
 
@@ -420,14 +360,6 @@ set_environment_variable \
     "$GCP_REGION"
 
 set_environment_variable \
-    "GCP_VM_FMSWS_HOST_PORT" \
-    "$GCP_VM_FMSWS_HOST_PORT"
-
-set_environment_variable \
-    "GCP_VM_HOST_PORT" \
-    "$GCP_VM_HOST_PORT"
-
-set_environment_variable \
     "GCP_VM_INSTANCE" \
     "$GCP_VM_INSTANCE"
 
@@ -437,395 +369,33 @@ set_environment_variable \
 
 
 # ============================================================
-# JSON Environment Variables
-# ============================================================
-
-
-# ============================================================
-# USER INPUT
+# Feeder config JSON (from files)
 # ============================================================
 
 echo ""
 echo "=========================================="
-echo "GCP VM CONFIGURATION"
+echo "Feeder config JSON files"
 echo "=========================================="
 
-read -p "Enter appid: " APP_ID
-
-read -p "Enter region: " REGION
-
-read -p "Enter accountname: " ACCOUNT_NAME
-
-read -p "Enter PostgreSQL URL: " PG_URL
-
-read -p "Enter socket server URL: " SOCKET_SERVER_URL
-
-
-# ============================================================
-# VALIDATE REQUIRED INPUTS
-# ============================================================
-
-if [[ -z "$APP_ID" ]]; then
-    echo "ERROR: appid is required"
-    exit 1
-fi
-
-if [[ -z "$REGION" ]]; then
-    echo "ERROR: region is required"
-    exit 1
-fi
-
-if [[ -z "$ACCOUNT_NAME" ]]; then
-    echo "ERROR: accountname is required"
-    exit 1
-fi
-
-if [[ -z "$PG_URL" ]]; then
-    echo "ERROR: PostgreSQL URL is required"
-    exit 1
-fi
-
-if [[ -z "$SOCKET_SERVER_URL" ]]; then
-    echo "ERROR: socket server URL is required"
-    exit 1
-fi
-
-
-# ============================================================
-# GENERATED VALUES
-# ============================================================
-
-echo ""
-echo "Generating UUID..."
-
-MOBILE_API_KEY=$(generate_uuid)
-
-echo "✓ UUID generated"
-
-
-echo ""
-echo "Generating Ed25519 keys..."
-
-generate_ed25519_keys
-
-FMSAPI_SERVER_PUB_KEY="$SERVER_PUB_KEY"
-FMSAPI_SERVER_PRV_KEY="$SERVER_PRV_KEY"
-
-echo "✓ Ed25519 keys generated"
-
-
-# ============================================================
-# DERIVED VALUES
-# ============================================================
-
-SCRATCH_DIR="/mnt/pssd/scratch/$ACCOUNT_NAME/fmsapi"
-
-
-# ============================================================
-# GENERATE GCP_VM_CONFIG_PATH
-# ============================================================
-
-GCP_VM_CONFIG_PATH=$(jq -n \
-    --arg appid "$APP_ID" \
-    --arg region "$REGION" \
-    --arg accountname "$ACCOUNT_NAME" \
-    --arg scratchdir "$SCRATCH_DIR" \
-    --arg pgurl "$PG_URL" \
-    --arg socketserverurl "$SOCKET_SERVER_URL" \
-    --arg serverpubkey "$FMSAPI_SERVER_PUB_KEY" \
-    --arg serverprvkey "$FMSAPI_SERVER_PRV_KEY" \
-    --arg apikey "$MOBILE_API_KEY" \
-    '{
-        appid: $appid,
-        apptype: "fmsapi",
-        region: $region,
-        env: "prod",
-        accountname: $accountname,
-
-        scratchdir: $scratchdir,
-
-        instconfig: {
-            maxcpu: 2,
-            metricstimeout: 10000
-        },
-
-        pgdb: {
-            pgurl: $pgurl
-        },
-
-        apiserver: {
-            port: 45001
-        },
-
-        serverauth: {
-            serverid: "fmsapi",
-            serverpubkey: $serverpubkey,
-            serverprvkey: $serverprvkey
-        },
-
-        consoleserverconfig: {
-            serviceaccountuserid: "----X----",
-            serviceaccountpubkey: "---X---",
-            serviceaccountprvkey: "---X---",
-            accountid: "---X---"
-        },
-
-        clickhouseconfig: {
-            urls: [
-                "34.100.160.127:9000",
-                "34.14.189.79:9000",
-                "35.244.6.244:9000"
-            ],
-            user: "default",
-            password: "intellicar@123",
-            database: "lafdatafr",
-            maxexecutiontime: 60,
-            dialtimeout: 30,
-            maxopenconns: 10,
-            maxidleconns: 10,
-            connmaxlifetime: 60,
-            blockbuffersize: 10,
-            maxcompressionbuffer: 10240,
-            cluster: "shard3_cluster",
-
-            tablenames: {
-                tripreporttable: "----X----",
-                tripdailybuckettable: "----X----",
-                chargereporttable: "----X----",
-                chargedailybuckettable: "----X----",
-                geofencerreporttable: "----X----",
-                alertreporttable: "----X----",
-                notificationtable: "----X----",
-                eventtelemetrytable: "----X----"
-            }
-        },
-
-        cqldst: {
-            clusterip: [
-                "34.100.254.218:9042",
-                "35.244.45.2:9042",
-                "34.93.203.143:9042"
-            ],
-            connecttimeout: 10000,
-            timeout: 50000,
-            streamtimeout: 600000,
-            keyspace: "lafdatafr",
-            numconnsperhost: 4
-        },
-
-        socketserverurl: $socketserverurl,
-
-        mobileserverconfig: {
-            apikey: $apikey
-        },
-
-        cmdapi: {
-            baseurl: "https://lafcmds.intellicar.in",
-            bearertoken: "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJ0eXBlIjoic3ZjYWNjdCIsIm5zaWQiOiJucy4xIiwiYWNjdG5hbWUiOiJyaXZlcnRlc3RAaW50ZWxsaWNhci5pbiIsInB1YmtleSI6Ijg2NkE1OEVDOEUwMjkyNTBEQ0JCMTBEM0RFRUY0QUNDNkFDMkQ0MUE0ODk1MTIyNzJERURCRjU5MUEyQjYyQTkiLCJpc3MiOiJpbnRjbWRzaGRsciIsImV4cCI6MTc4NTM0NjExOCwiaWF0IjoxNzg0NzQxMzE4fQ.tIbqWYymPtVqQ6QMkhEJk8sI97qt1auVyjnz8ZimthIgREc8PdsXXbU626BA-0InjVnnYbpH4IHaoAZq-2LR3Dw",
-            nsid: "ns.1",
-            dirpath: "/laffota/bgauss-test-albin",
-            validtill: 3600000
-        },
-
-        lafcmddebug: {
-            baseurl: "https://lafcmddebug.intellicar.io"
-        },
-
-        emailconfig: {
-            hosturl: "https://control.msg91.com/api/v5/email/send",
-            authkey: "409208ATRjpyQbxSy654364baP1",
-            cookie: "PHPSESSID=c6dj5pf01280i8clh47fj0cdm5",
-            domain: "msg91.intellicar.in"
-        },
-
-        fmswsauthconfig: {
-            serverid: "fmsws",
-            serverpubkey: "B7054F47BCBB78A7A7DDAE2123155B917BA47270775A09E3C7B77C03DC3F62B6"
-        },
-
-        taskconfig: {
-            hosturl: "https://bgauss-fr.intellicar.app",
-            alertemail: "infrateamalert@intellicar.in",
-            fromname: "intellicarBgauss",
-            fromemail: "bgauss@intellicar.in",
-            supportemail: "bgauss@intellicar.in",
-            inviteexpiresinlabel: "1 day",
-            forgotpasswordexpiresinlabel: "10 minutes"
-        },
-
-        wspusher: {
-            wshost: "----X----",
-            wsport: 11884,
-            prefix: "----X----",
-            maxinflight: 10240,
-            connecttimeout: 10000,
-            connectretrytimeout: 10000,
-            keepalivetimeout: 10000
-        },
-
-        gcsconfig: {
-            credentialsfile: "----X----",
-            bucketname: "fmsstorage"
-        },
-
-        auditstrmserverconfig: {
-            wsserverurl: "----X----",
-            connecttimeout: 5000,
-            reconnectinterval: 3000,
-            keepaliveinterval: 15000,
-            readtimeout: 60000,
-            maxinflightauditmsgs: 128,
-            reqbuffersize: 256
-        }
-    }'
-)
-
-
-# ============================================================
-# DISPLAY GENERATED CONFIG
-# ============================================================
-
-echo ""
-echo "=========================================="
-echo "Generated GCP_VM_CONFIG_PATH"
-echo "=========================================="
-
-echo "$GCP_VM_CONFIG_PATH" | jq .
-
-
-# ============================================================
-# NOW SET IT AS GITHUB ENVIRONMENT VARIABLE
-# ============================================================
+GCP_VM_LAFCASFEEDER_CONFIG_PATH=$(read_config_json "lafcasfeeder")
+GCP_VM_LAFGEOALRTFEEDER_CONFIG_PATH=$(read_config_json "lafgeoalrtfeeder")
+GCP_VM_LAFRTKFEEDER_CONFIG_PATH=$(read_config_json "lafrtkfeeder")
 
 set_environment_variable \
-    "GCP_VM_CONFIG_PATH" \
-    "$GCP_VM_CONFIG_PATH"
-    
-
-echo ""
-echo "=========================================="
-echo "FMSWS CONFIGURATION"
-echo "=========================================="
-
-read -p "Enter FMSWS PostgreSQL URL: " FMSWS_PG_URL
-read -p "Enter FMSWS PostgreSQL schema name: " FMSWS_SCHEMA_NAME
-
-# Optional placeholders
-read -p "Enter WebSocket broker host [----X----]: " input
-FMSWS_BROKER_HOST="${input:-----X----}"
-
-read -p "Enter WS base topic [----X----]: " input
-FMSWS_BASE_TOPIC="${input:-----X----}"
-
-read -p "Enter audit stream server URL [---X---]: " input
-FMSWS_AUDIT_URL="${input:----X---}"
-
-read -p "Enter live track base path [----X----]: " input
-FMSWS_LIVETRACK_BASEPATH="${input:-----X----}" 
-
-echo "Generating FMSWS Ed25519 keys..."
-
-generate_ed25519_keys
-
-FMSWS_SERVER_PRV_KEY="$SERVER_PRV_KEY"
-FMSWS_SERVER_PUB_KEY="$SERVER_PUB_KEY"
-
-echo "✓ FMSWS keys generated"
-
-FMSWS_SCRATCH_DIR="/mnt/pssd/scratch/$ACCOUNT_NAME/fmsws"
-
-GCP_VM_FMSWS_CONFIG_PATH=$(jq -n \
-    --arg accountname "$ACCOUNT_NAME" \
-    --arg scratchdir "$FMSWS_SCRATCH_DIR" \
-    --arg pgurl "$FMSWS_PG_URL" \
-    --arg schemaname "$FMSWS_SCHEMA_NAME" \
-    --arg brokerhost "$FMSWS_BROKER_HOST" \
-    --arg wsbasetopic "$FMSWS_BASE_TOPIC" \
-    --arg fmsapipubkey "$FMSAPI_SERVER_PUB_KEY" \
-    --arg serverpubkey "$FMSWS_SERVER_PUB_KEY" \
-    --arg serverprvkey "$FMSWS_SERVER_PRV_KEY" \
-    --arg auditurl "$FMSWS_AUDIT_URL" \
-    --arg basepath "$FMSWS_LIVETRACK_BASEPATH" \
-    '{
-        appid: "fmsws",
-        apptype: "fmsws",
-
-        scratchdir: $scratchdir,
-
-        instconfig: {
-            maxcpu: 2,
-            metricstimeout: 10000
-        },
-
-        pgsqlconfig: {
-            pgurl: $pgurl,
-            schemaname: $schemaname
-        },
-
-        apiserverconfig: {
-            port: 45014
-        },
-
-        wspullerrtconfig: {
-            brokerHost: $brokerhost,
-            brokerPort: 11884,
-            connectTimeout: 10000,
-            keepAliveTimeout: 10000,
-            connectRetryTimeout: 10000
-        },
-
-        wsfmsconnhdlrconfig: {
-            connrxdatachlen: 64
-        },
-
-        wsbasetopic: $wsbasetopic,
-
-        fmsserverauthconfig: {
-            serverid: "fmsapi",
-            serverpubkey: $fmsapipubkey
-        },
-
-        serverauthconfig: {
-            serverid: "fmsws",
-            serverpubkey: $serverpubkey,
-            serverprvkey: $serverprvkey
-        },
-
-        auditstrmserverconfig: {
-            wsserverurl: $auditurl,
-            connecttimeout: 5000,
-            reconnectinterval: 5000,
-            keepaliveinterval: 30000,
-            readtimeout: 60000,
-            maxinflightauditmsgs: 128,
-            reqbuffersize: 128
-        },
-
-        livetracklinkconfig: {
-            basepath: $basepath,
-            allowedorigins: [
-                "http://localhost:3000",
-                "http://localhost:3001",
-                "https://dev-fleet-1.intellicar.app",
-                "https://fleet-1.intellicar.app",
-                "https://console.intellicar.app",
-                "https://fms.intellicar.app",
-                "https://fms-in-20.intellicar.app",
-                "http://192.168.91.3:3000",
-                "https://bgauss-fr.intellicar.app"
-            ]
-        }
-    }'
-)
-
+    "GCP_VM_LAFCASFEEDER_CONFIG_PATH" \
+    "$GCP_VM_LAFCASFEEDER_CONFIG_PATH"
 
 set_environment_variable \
-    "GCP_VM_FMSWS_CONFIG_PATH" \
-    "$GCP_VM_FMSWS_CONFIG_PATH"
+    "GCP_VM_LAFGEOALRTFEEDER_CONFIG_PATH" \
+    "$GCP_VM_LAFGEOALRTFEEDER_CONFIG_PATH"
+
+set_environment_variable \
+    "GCP_VM_LAFRTKFEEDER_CONFIG_PATH" \
+    "$GCP_VM_LAFRTKFEEDER_CONFIG_PATH"
 
 
 # ============================================================
-# 4. Get Environment Public Key
+# Get Environment Public Key
 # ============================================================
 
 echo ""
@@ -853,7 +423,7 @@ echo "✓ Public key retrieved"
 
 
 # ============================================================
-# 5. Encrypt Secret
+# Encrypt Secret
 # ============================================================
 
 encrypt_secret() {
@@ -892,7 +462,7 @@ PY
 
 
 # ============================================================
-# 6. Create / Update Environment Secret
+# Create / Update Environment Secret
 # ============================================================
 
 set_environment_secret() {
@@ -936,7 +506,7 @@ set_environment_secret() {
 
 
 # ============================================================
-# 7. Secrets
+# Secrets
 # ============================================================
 
 echo ""
@@ -946,20 +516,16 @@ echo "=========================================="
 
 read -p "Enter GCP_CREDENTIALS_JSON: " GCP_CREDENTIALS_JSON
 
-read -p "Enter GCP_GCS_CREDENTIALS_JSON: " GCP_GCS_CREDENTIALS_JSON
-
 read -p "Enter GH_PRIVATE_MODULES_TOKEN: " GH_PRIVATE_MODULES_TOKEN
 
 
 : "${GCP_CREDENTIALS_JSON:?GCP_CREDENTIALS_JSON is required}"
 
-: "${GCP_GCS_CREDENTIALS_JSON:?GCP_GCS_CREDENTIALS_JSON is required}"
-
 : "${GH_PRIVATE_MODULES_TOKEN:?GH_PRIVATE_MODULES_TOKEN is required}"
 
 
 # ============================================================
-# 8. Create / Update Secrets
+# Create / Update Secrets
 # ============================================================
 
 echo ""
@@ -972,13 +538,8 @@ set_environment_secret \
     "$GCP_CREDENTIALS_JSON"
 
 set_environment_secret \
-    "GCP_GCS_CREDENTIALS_JSON" \
-    "$GCP_GCS_CREDENTIALS_JSON"
-
-set_environment_secret \
     "GH_PRIVATE_MODULES_TOKEN" \
     "$GH_PRIVATE_MODULES_TOKEN"
-
 
 
 # ============================================================
@@ -995,21 +556,17 @@ echo "Repository:   $OWNER/$REPO"
 echo "Environment:  $ENVIRONMENT"
 echo ""
 echo "Environment variables:"
-echo "  ✓ FLEETMODULE_CONTAINER_PORT"
-echo "  ✓ FMSWS_CONTAINER_PORT"
 echo "  ✓ GCP_ARTIFACT_REPO"
 echo "  ✓ GCP_PROJECT_ID"
 echo "  ✓ GCP_REGION"
-echo "  ✓ GCP_VM_CONFIG_PATH"
-echo "  ✓ GCP_VM_FMSWS_CONFIG_PATH"
-echo "  ✓ GCP_VM_FMSWS_HOST_PORT"
-echo "  ✓ GCP_VM_HOST_PORT"
 echo "  ✓ GCP_VM_INSTANCE"
 echo "  ✓ GCP_VM_ZONE"
+echo "  ✓ GCP_VM_LAFCASFEEDER_CONFIG_PATH"
+echo "  ✓ GCP_VM_LAFGEOALRTFEEDER_CONFIG_PATH"
+echo "  ✓ GCP_VM_LAFRTKFEEDER_CONFIG_PATH"
 echo ""
 echo "Environment secrets:"
 echo "  ✓ GCP_CREDENTIALS_JSON"
-echo "  ✓ GCP_GCS_CREDENTIALS_JSON"
 echo "  ✓ GH_PRIVATE_MODULES_TOKEN"
 echo ""
 

@@ -1,0 +1,261 @@
+name: Build and Deploy
+
+run-name: >
+  Build & Deploy • ${{ inputs.environment }}
+  • Deploy=${{ inputs.deploy }}
+  • ${{ github.ref_name }}
+  • @${{ github.actor }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      deploy:
+        description: "Deploy after build?"
+        required: true
+        default: false
+        type: boolean
+      environment:
+        description: "Deployment Environment"
+        required: true
+        default: {{__ENVIRONMENT__}}
+        type: choice
+        options:
+          - {{__ENVIRONMENT__}}
+
+env:
+  GO_VERSION: "1.26.4"
+  GOOS: linux
+  GOARCH: amd64
+  CGO_ENABLED: "0"
+  GOPRIVATE: github.com/fabrikiot/*,github.com/intellicars/*
+  GONOSUMDB: github.com/fabrikiot/*,github.com/intellicars/*
+
+jobs:
+  build:
+    name: Build & push Docker images (${{ inputs.environment }})
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.environment }}
+    permissions:
+      contents: read
+    outputs:
+      lafcasfeeder_image: ${{ steps.push.outputs.lafcasfeeder_image }}
+      lafgeoalrtfeeder_image: ${{ steps.push.outputs.lafgeoalrtfeeder_image }}
+      lafrtkfeeder_image: ${{ steps.push.outputs.lafrtkfeeder_image }}
+    env:
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      GCP_REGION: ${{ vars.GCP_REGION }}
+      GCP_ARTIFACT_REPO: ${{ vars.GCP_ARTIFACT_REPO }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+          cache-dependency-path: |
+            go.work.sum
+            lafcasfeeder/go.sum
+            lafgeoalrtfeeder/go.sum
+            lafrtkfeeder/go.sum
+
+      - name: Configure access for private Go modules
+        env:
+          GH_PRIVATE_MODULES_TOKEN: ${{ secrets.GH_PRIVATE_MODULES_TOKEN }}
+        run: |
+          set -euo pipefail
+          TOKEN="$(printf '%s' "$GH_PRIVATE_MODULES_TOKEN" | tr -d '[:space:]')"
+          git config --global url."https://x-access-token:${TOKEN}@github.com/".insteadOf "https://github.com/"
+
+      - name: Sync workspace
+        run: go work sync
+
+      - name: Build Linux binaries
+        run: |
+          set -euo pipefail
+          (cd lafcasfeeder && CGO_ENABLED=${{ env.CGO_ENABLED }} GOOS=${{ env.GOOS }} GOARCH=${{ env.GOARCH }} go build -ldflags="-s -w" -o lafcasfeeder .) &
+          (cd lafgeoalrtfeeder && CGO_ENABLED=${{ env.CGO_ENABLED }} GOOS=${{ env.GOOS }} GOARCH=${{ env.GOARCH }} go build -ldflags="-s -w" -o lafgeoalrtfeeder .) &
+          (cd lafrtkfeeder && CGO_ENABLED=${{ env.CGO_ENABLED }} GOOS=${{ env.GOOS }} GOARCH=${{ env.GOARCH }} go build -ldflags="-s -w" -o lafrtkfeeder .) &
+          wait
+
+      - name: Verify binaries are statically linked
+        run: |
+          set -euo pipefail
+          for bin in lafcasfeeder/lafcasfeeder lafgeoalrtfeeder/lafgeoalrtfeeder lafrtkfeeder/lafrtkfeeder; do
+            echo "== $bin =="
+            file "$bin"
+            if file "$bin" | grep -qi "dynamically linked"; then
+              echo "ERROR: $bin is dynamically linked; CGO_ENABLED=0 did not take effect." >&2
+              exit 1
+            fi
+          done
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_CREDENTIALS_JSON }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build and push images
+        id: push
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_SHA::7}"
+          REGISTRY="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${GCP_ARTIFACT_REPO}"
+
+          build_and_push() {
+            local service="$1"
+            local image="${REGISTRY}/${service}:${TAG}"
+            local cache="${REGISTRY}/buildcache:${service}"
+            echo "==> building and pushing ${service}"
+            docker buildx build \
+              -t "$image" \
+              -t "${REGISTRY}/${service}:latest" \
+              --cache-from "type=registry,ref=${cache}" \
+              --cache-to "type=registry,ref=${cache},mode=max" \
+              --push \
+              "$service"
+            echo "${service}_image=${image}" > "/tmp/${service}_image.out"
+            echo "Pushed ${image}"
+          }
+
+          build_and_push lafcasfeeder &
+          build_and_push lafgeoalrtfeeder &
+          build_and_push lafrtkfeeder &
+          wait
+          cat /tmp/lafcasfeeder_image.out /tmp/lafgeoalrtfeeder_image.out /tmp/lafrtkfeeder_image.out >> "$GITHUB_OUTPUT"
+
+  deploy:
+    name: Deploy to GCP VM ${{ inputs.environment }}
+    needs: build
+    if: ${{ inputs.deploy }}
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.environment }}
+    permissions:
+      contents: read
+    env:
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      GCP_REGION: ${{ vars.GCP_REGION }}
+      GCP_VM_INSTANCE: ${{ vars.GCP_VM_INSTANCE }}
+      GCP_VM_ZONE: ${{ vars.GCP_VM_ZONE }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/scripts
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_CREDENTIALS_JSON }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Deploy services to GCP VM
+        env:
+          LAFCASFEEDER_IMAGE: ${{ needs.build.outputs.lafcasfeeder_image }}
+          LAFGEOALRTFEEDER_IMAGE: ${{ needs.build.outputs.lafgeoalrtfeeder_image }}
+          LAFRTKFEEDER_IMAGE: ${{ needs.build.outputs.lafrtkfeeder_image }}
+          LAFCASFEEDER_CONFIG_JSON: ${{ vars.GCP_VM_LAFCASFEEDER_CONFIG_PATH }}
+          LAFGEOALRTFEEDER_CONFIG_JSON: ${{ vars.GCP_VM_LAFGEOALRTFEEDER_CONFIG_PATH }}
+          LAFRTKFEEDER_CONFIG_JSON: ${{ vars.GCP_VM_LAFRTKFEEDER_CONFIG_PATH }}
+        run: |
+          set -euo pipefail
+
+          cleanup_runner() {
+            rm -f /tmp/ar-access-token \
+                  /tmp/lafcasfeeder.config.json \
+                  /tmp/lafgeoalrtfeeder.config.json \
+                  /tmp/lafrtkfeeder.config.json \
+                  /tmp/deploy.env
+          }
+          trap cleanup_runner EXIT
+
+          require_re() {
+            local name="$1" value="$2" re="$3"
+            [[ "$value" =~ $re ]] || {
+              echo "invalid ${name}: must match ${re}" >&2
+              exit 1
+            }
+          }
+
+          require_re GCP_REGION "$GCP_REGION" '^[a-z][a-z0-9-]*$'
+          require_re GCP_PROJECT_ID "$GCP_PROJECT_ID" '^[a-z][a-z0-9-]{4,28}[a-z0-9]$'
+          require_re GCP_VM_INSTANCE "$GCP_VM_INSTANCE" '^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$'
+          require_re GCP_VM_ZONE "$GCP_VM_ZONE" '^[a-z][a-z0-9-]*$'
+          require_re LAFCASFEEDER_IMAGE "$LAFCASFEEDER_IMAGE" \
+            '^[a-z0-9-]+-docker\.pkg\.dev/[a-z0-9-]+/[a-z0-9-]+/lafcasfeeder:[A-Za-z0-9._-]+$'
+          require_re LAFGEOALRTFEEDER_IMAGE "$LAFGEOALRTFEEDER_IMAGE" \
+            '^[a-z0-9-]+-docker\.pkg\.dev/[a-z0-9-]+/[a-z0-9-]+/lafgeoalrtfeeder:[A-Za-z0-9._-]+$'
+          require_re LAFRTKFEEDER_IMAGE "$LAFRTKFEEDER_IMAGE" \
+            '^[a-z0-9-]+-docker\.pkg\.dev/[a-z0-9-]+/[a-z0-9-]+/lafrtkfeeder:[A-Za-z0-9._-]+$'
+
+          REGISTRY_HOST="${GCP_REGION}-docker.pkg.dev"
+          require_re REGISTRY_HOST "$REGISTRY_HOST" '^[a-z0-9-]+-docker\.pkg\.dev$'
+          VM="${GCP_VM_INSTANCE}"
+          COMMON_FLAGS=(
+            --project="${GCP_PROJECT_ID}"
+            --zone="${GCP_VM_ZONE}"
+            --tunnel-through-iap
+            --quiet)
+
+          umask 077
+          {
+            printf 'REGISTRY_HOST=%q\n' "$REGISTRY_HOST"
+            printf 'LAFCASFEEDER_IMAGE=%q\n' "$LAFCASFEEDER_IMAGE"
+            printf 'LAFGEOALRTFEEDER_IMAGE=%q\n' "$LAFGEOALRTFEEDER_IMAGE"
+            printf 'LAFRTKFEEDER_IMAGE=%q\n' "$LAFRTKFEEDER_IMAGE"
+          } > /tmp/deploy.env
+          gcloud auth print-access-token > /tmp/ar-access-token
+          printf '%s' "$LAFCASFEEDER_CONFIG_JSON" > /tmp/lafcasfeeder.config.json
+          printf '%s' "$LAFGEOALRTFEEDER_CONFIG_JSON" > /tmp/lafgeoalrtfeeder.config.json
+          printf '%s' "$LAFRTKFEEDER_CONFIG_JSON" > /tmp/lafrtkfeeder.config.json
+          chmod 600 /tmp/deploy.env /tmp/ar-access-token \
+            /tmp/lafcasfeeder.config.json \
+            /tmp/lafgeoalrtfeeder.config.json \
+            /tmp/lafrtkfeeder.config.json
+
+          gcloud compute scp \
+            "${COMMON_FLAGS[@]}" \
+            /tmp/ar-access-token \
+            /tmp/deploy.env \
+            .github/scripts/gcp-deploy-service.sh \
+            /tmp/lafcasfeeder.config.json \
+            /tmp/lafgeoalrtfeeder.config.json \
+            /tmp/lafrtkfeeder.config.json \
+            "${VM}:/tmp/"
+
+          gcloud compute ssh "${VM}" "${COMMON_FLAGS[@]}" --command="$(cat <<'REMOTE'
+          set -euo pipefail
+          cleanup() {
+            if [[ -n "${REGISTRY_HOST:-}" ]]; then
+              sudo docker logout "${REGISTRY_HOST}" >/dev/null 2>&1 || true
+            fi
+            rm -f /tmp/ar-access-token \
+                  /tmp/lafcasfeeder.config.json \
+                  /tmp/lafgeoalrtfeeder.config.json \
+                  /tmp/lafrtkfeeder.config.json \
+                  /tmp/deploy.env
+          }
+          trap cleanup EXIT
+          chmod 600 /tmp/ar-access-token /tmp/deploy.env \
+            /tmp/lafcasfeeder.config.json \
+            /tmp/lafgeoalrtfeeder.config.json \
+            /tmp/lafrtkfeeder.config.json
+          # shellcheck disable=SC1091
+          . /tmp/deploy.env
+          sudo docker login -u oauth2accesstoken --password-stdin "https://${REGISTRY_HOST}" < /tmp/ar-access-token
+          chmod +x /tmp/gcp-deploy-service.sh
+          SKIP_REGISTRY_AUTH=1 IMAGE="${LAFCASFEEDER_IMAGE}" SERVICE_NAME=lafcasfeeder CONFIG_PATH=/tmp/lafcasfeeder.config.json /tmp/gcp-deploy-service.sh
+          SKIP_REGISTRY_AUTH=1 IMAGE="${LAFGEOALRTFEEDER_IMAGE}" SERVICE_NAME=lafgeoalrtfeeder CONFIG_PATH=/tmp/lafgeoalrtfeeder.config.json /tmp/gcp-deploy-service.sh
+          SKIP_REGISTRY_AUTH=1 IMAGE="${LAFRTKFEEDER_IMAGE}" SERVICE_NAME=lafrtkfeeder CONFIG_PATH=/tmp/lafrtkfeeder.config.json /tmp/gcp-deploy-service.sh
+          REMOTE
+          )"
